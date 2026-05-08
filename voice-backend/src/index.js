@@ -28,27 +28,48 @@ const openai = new OpenAI({
   apiKey: requireEnv('OPENAI_API_KEY'),
   // Render/free-tier networking can occasionally reset connections.
   // Let the SDK retry transient failures and allow a bit more time.
-  maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 4),
-  timeout: Number(process.env.OPENAI_TIMEOUT_MS || 60000),
+  maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 6),
+  timeout: Number(process.env.OPENAI_TIMEOUT_MS || 90000),
 });
 
-async function withConnResetRetries(fn, { retries = 2, baseDelayMs = 400 } = {}) {
+function isTransientNetworkError(e) {
+  const code = e?.cause?.code || e?.code;
+  const msg = String(e?.message || '');
+  // Common transient network errors on Render / Node fetch:
+  return (
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ENOTFOUND' ||
+    msg.includes('APIConnectionError') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('socket hang up') ||
+    msg.includes('undici') // undici often wraps as TypeError w/ cause
+  );
+}
+
+async function withConnResetRetries(fn, { retries = 4, baseDelayMs = 400 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (e) {
       lastErr = e;
-      const code = e?.cause?.code || e?.code;
-      const msg = String(e?.message || '');
-      const isConnReset = code === 'ECONNRESET' || msg.includes('APIConnectionError') || msg.includes('ECONNRESET');
-      if (!isConnReset || attempt >= retries) throw e;
+      if (!isTransientNetworkError(e) || attempt >= retries) throw e;
       const delay = baseDelayMs * 2 ** attempt;
       await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastErr;
 }
+
+process.on('unhandledRejection', (e) => {
+  console.error('[voice] unhandledRejection', e);
+});
+
+process.on('uncaughtException', (e) => {
+  console.error('[voice] uncaughtException', e);
+});
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
@@ -212,7 +233,8 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
       totalMs: total,
     });
     console.error(e);
-    return res.status(500).json({
+    const isTransient = isTransientNetworkError(e);
+    return res.status(isTransient ? 503 : 500).json({
       error: e?.message || 'Unknown error',
       code,
       stage,

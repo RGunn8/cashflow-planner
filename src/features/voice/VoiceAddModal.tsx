@@ -1,6 +1,12 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, Text, View } from 'react-native';
-import { Audio } from 'expo-av';
+import {
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 
 // Keep recordings short and low bitrate to reduce upload/transcription latency.
 const MAX_RECORD_MS = 12_000;
@@ -46,16 +52,15 @@ export function VoiceAddModal(props: {
   onClose: () => void;
   onResult: (res: VoiceParseResponse) => void;
 }) {
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
-  const recordingRef = useRef<Audio.Recording | null>(null);
   const autoStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [isRecording, setIsRecording] = useState(false);
+  const audioRecorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
+  const recorderState = useAudioRecorderState(audioRecorder);
   const [isUploading, setIsUploading] = useState(false);
   const [statusText, setStatusText] = useState<string>('');
 
-  const canStart = props.open && !isRecording && !isUploading;
-  const canStop = props.open && isRecording && !isUploading;
+  const canStart = props.open && !recorderState.isRecording && !isUploading;
+  const canStop = props.open && recorderState.isRecording && !isUploading;
 
   const apiUrl = useMemo(() => voiceApiUrl(), []);
 
@@ -66,25 +71,20 @@ export function VoiceAddModal(props: {
     }
 
     try {
-      const perm = await Audio.requestPermissionsAsync();
+      const perm = await AudioModule.requestRecordingPermissionsAsync();
       if (!perm.granted) {
         Alert.alert('Microphone permission', 'Microphone access is required for voice input.');
         return;
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
 
       // Lower-quality audio is faster to upload/transcribe and is sufficient for speech.
-      const rec = new Audio.Recording();
-      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.LOW_QUALITY);
-      await rec.startAsync();
-
-      recordingRef.current = rec;
-      setRecording(rec);
-      setIsRecording(true);
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
       setStatusText('Recording…');
       console.log('[voice] recording started');
 
@@ -92,16 +92,14 @@ export function VoiceAddModal(props: {
       if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
       autoStopTimerRef.current = setTimeout(() => {
         console.log('[voice] auto-stop timer fired');
-        void stopAndUpload(rec);
+        void stopAndUpload();
       }, MAX_RECORD_MS);
     } catch (e: any) {
       Alert.alert('Could not start recording', e?.message ?? 'Unknown error');
     }
   }
 
-  async function stopAndUpload(recOverride?: Audio.Recording | null) {
-    const rec = recOverride ?? recordingRef.current ?? recording;
-    if (!rec) return;
+  async function stopAndUpload() {
     if (!apiUrl) return;
 
     if (autoStopTimerRef.current) {
@@ -113,14 +111,11 @@ export function VoiceAddModal(props: {
 
     try {
       setIsUploading(true);
-      setIsRecording(false);
       setStatusText('Uploading…');
 
       console.log('[voice] stopping recorder');
-      await rec.stopAndUnloadAsync();
-      const uri = rec.getURI();
-      recordingRef.current = null;
-      setRecording(null);
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
 
       if (!uri) throw new Error('No audio URI produced');
 
@@ -147,6 +142,9 @@ export function VoiceAddModal(props: {
 
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
+        if (res.status === 502 || /Bad Gateway/i.test(txt)) {
+          throw new Error('Voice server is unavailable (502). Try again in a minute, or check your Render deploy logs.');
+        }
         throw new Error(`Voice API error (${res.status}): ${txt || res.statusText}`);
       }
 
@@ -175,14 +173,10 @@ export function VoiceAddModal(props: {
         clearTimeout(autoStopTimerRef.current);
         autoStopTimerRef.current = null;
       }
-      const rec = recordingRef.current ?? recording;
-      if (rec) {
-        await rec.stopAndUnloadAsync().catch(() => {});
+      if (recorderState.isRecording) {
+        await audioRecorder.stop().catch(() => {});
       }
     } finally {
-      recordingRef.current = null;
-      setRecording(null);
-      setIsRecording(false);
       setIsUploading(false);
       setStatusText('');
       props.onClose();
@@ -226,7 +220,7 @@ export function VoiceAddModal(props: {
         </View>
 
         {statusText ? <Text className="mt-3 text-xs font-semibold text-neutral-500">{statusText}</Text> : null}
-        {isRecording ? <Text className="mt-1 text-xs font-semibold text-rose-700">Recording…</Text> : null}
+        {recorderState.isRecording ? <Text className="mt-1 text-xs font-semibold text-rose-700">Recording…</Text> : null}
       </View>
     </View>
   );
