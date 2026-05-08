@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: cashflow-voice-backend
+    env: node
+    plan: starter
+    rootDir: voice-backend
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_TRANSCRIBE_MODEL
+        value: whisper-1
+      - key: OPENAI_EXTRACT_MODEL
+        value: gpt-4o-mini
