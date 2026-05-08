@@ -23,10 +23,41 @@ function requireEnv(name) {
   return v;
 }
 
-const openai = new OpenAI({ apiKey: requireEnv('OPENAI_API_KEY') });
+const openai = new OpenAI({
+  apiKey: requireEnv('OPENAI_API_KEY'),
+  // Render/free-tier networking can occasionally reset connections.
+  // Let the SDK retry transient failures and allow a bit more time.
+  maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 4),
+  timeout: Number(process.env.OPENAI_TIMEOUT_MS || 60000),
+});
+
+async function withConnResetRetries(fn, { retries = 2, baseDelayMs = 400 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const code = e?.cause?.code || e?.code;
+      const msg = String(e?.message || '');
+      const isConnReset = code === 'ECONNRESET' || msg.includes('APIConnectionError') || msg.includes('ECONNRESET');
+      if (!isConnReset || attempt >= retries) throw e;
+      const delay = baseDelayMs * 2 ** attempt;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get('/', (_req, res) => {
+  res
+    .status(200)
+    .type('text/plain')
+    .send('cashflow voice backend: POST /voice/parse (multipart form-data field "audio"), GET /health');
 });
 
 /**
@@ -50,10 +81,12 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
       type: file.mimetype || 'audio/m4a',
     });
 
-    const transcription = await openai.audio.transcriptions.create({
-      file: audioFile,
-      model: process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1',
-    });
+    const transcription = await withConnResetRetries(() =>
+      openai.audio.transcriptions.create({
+        file: audioFile,
+        model: process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1',
+      })
+    );
 
     const transcript = (transcription?.text || '').trim();
     if (!transcript) return res.json({ transcript: '', intent: 'unknown' });
@@ -76,7 +109,10 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
           properties: {
             description: { type: 'string' },
             amount: { type: 'number', description: 'Signed. Bills/spend should be negative.' },
-            date: { type: 'string', description: 'YYYY-MM-DD if specified or implied (today/yesterday/tomorrow). Omit if unknown.' },
+            date: {
+              type: 'string',
+              description: 'YYYY-MM-DD if specified or implied (today/yesterday/tomorrow). Omit if unknown.',
+            },
             tags: { type: 'array', items: { type: 'string' } },
           },
         },
@@ -106,14 +142,16 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
       `- If ambiguous, intent=unknown.\n\n` +
       `Return JSON that matches this JSON Schema:\n${JSON.stringify(schemaHint)}`;
 
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_EXTRACT_MODEL || 'gpt-4o-mini',
-      temperature: 0,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-    });
+    const completion = await withConnResetRetries(() =>
+      openai.chat.completions.create({
+        model: process.env.OPENAI_EXTRACT_MODEL || 'gpt-4o-mini',
+        temperature: 0,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      })
+    );
 
     const content = completion.choices?.[0]?.message?.content?.trim() || '';
 
@@ -138,7 +176,11 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
     return res.json(parsed);
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: e?.message || 'Unknown error' });
+    const code = e?.cause?.code || e?.code;
+    return res.status(500).json({
+      error: e?.message || 'Unknown error',
+      code,
+    });
   }
 });
 
