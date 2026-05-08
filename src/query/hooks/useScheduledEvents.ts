@@ -20,7 +20,6 @@ export function useScheduledEvents(params: { rangeKey: string; from: string; to:
               where: {
                 userId,
                 ...(accountId ? { accountId } : {}),
-                date: { $gte: from, $lte: to },
               },
             },
           },
@@ -28,7 +27,10 @@ export function useScheduledEvents(params: { rangeKey: string; from: string; to:
       : {}) as any
   );
 
-  const events = (instant?.data?.scheduledEvents ?? []) as ScheduledEvent[];
+  const all = (instant?.data?.scheduledEvents ?? []) as ScheduledEvent[];
+  // Filter client-side so the app still works even if the remote schema
+  // hasn't been updated to index `scheduledEvents.date` yet.
+  const events = all.filter((e) => e.date >= from && e.date <= to);
 
   useEffect(() => {
     if (!userId) return;
