@@ -33,6 +33,8 @@ export type VoiceParseResponse = {
   intent: VoiceIntent;
   transaction?: VoiceTransactionDraft;
   recurring?: VoiceRecurringDraft;
+  requestId?: string;
+  timingsMs?: { total?: number };
 };
 
 function voiceApiUrl(): string | null {
@@ -50,6 +52,7 @@ export function VoiceAddModal(props: {
 
   const [isRecording, setIsRecording] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [statusText, setStatusText] = useState<string>('');
 
   const canStart = props.open && !isRecording && !isUploading;
   const canStop = props.open && isRecording && !isUploading;
@@ -82,11 +85,13 @@ export function VoiceAddModal(props: {
       recordingRef.current = rec;
       setRecording(rec);
       setIsRecording(true);
+      setStatusText('Recording…');
+      console.log('[voice] recording started');
 
       // Auto-stop to keep uploads/transcription fast.
       if (autoStopTimerRef.current) clearTimeout(autoStopTimerRef.current);
       autoStopTimerRef.current = setTimeout(() => {
-        // Fire-and-forget; stopAndUpload handles state + errors.
+        console.log('[voice] auto-stop timer fired');
         void stopAndUpload(rec);
       }, MAX_RECORD_MS);
     } catch (e: any) {
@@ -104,16 +109,22 @@ export function VoiceAddModal(props: {
       autoStopTimerRef.current = null;
     }
 
+    const baseUrl = apiUrl.replace(/\/$/, '');
+
     try {
       setIsUploading(true);
       setIsRecording(false);
+      setStatusText('Uploading…');
 
+      console.log('[voice] stopping recorder');
       await rec.stopAndUnloadAsync();
       const uri = rec.getURI();
       recordingRef.current = null;
       setRecording(null);
 
       if (!uri) throw new Error('No audio URI produced');
+
+      console.log('[voice] upload start', { url: baseUrl + '/voice/parse', uri });
 
       const form = new FormData();
       form.append('audio', {
@@ -122,30 +133,39 @@ export function VoiceAddModal(props: {
         type: 'audio/m4a',
       } as any);
 
-      const res = await fetch(apiUrl.replace(/\/$/, '') + '/voice/parse', {
+      const t0 = Date.now();
+      const res = await fetch(baseUrl + '/voice/parse', {
         method: 'POST',
         body: form,
         headers: {
           // Let fetch set multipart boundary automatically
         } as any,
       });
+      const t1 = Date.now();
+
+      console.log('[voice] response', { status: res.status, ms: t1 - t0 });
 
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
         throw new Error(`Voice API error (${res.status}): ${txt || res.statusText}`);
       }
 
+      setStatusText('Parsing…');
       const json = (await res.json()) as VoiceParseResponse;
       if (!json || typeof json.transcript !== 'string') {
         throw new Error('Invalid response from voice API');
       }
 
+      console.log('[voice] success', { requestId: json.requestId, timingsMs: json.timingsMs });
+
       props.onResult(json);
       props.onClose();
     } catch (e: any) {
+      console.log('[voice] failed', e);
       Alert.alert('Voice input failed', e?.message ?? 'Unknown error');
     } finally {
       setIsUploading(false);
+      setStatusText('');
     }
   }
 
@@ -164,6 +184,7 @@ export function VoiceAddModal(props: {
       setRecording(null);
       setIsRecording(false);
       setIsUploading(false);
+      setStatusText('');
       props.onClose();
     }
   }
@@ -204,8 +225,8 @@ export function VoiceAddModal(props: {
           </Pressable>
         </View>
 
-        {isUploading ? <Text className="mt-3 text-xs font-semibold text-neutral-500">Transcribing…</Text> : null}
-        {isRecording ? <Text className="mt-3 text-xs font-semibold text-rose-700">Recording…</Text> : null}
+        {statusText ? <Text className="mt-3 text-xs font-semibold text-neutral-500">{statusText}</Text> : null}
+        {isRecording ? <Text className="mt-1 text-xs font-semibold text-rose-700">Recording…</Text> : null}
       </View>
     </View>
   );
