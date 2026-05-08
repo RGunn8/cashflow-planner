@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -63,35 +64,53 @@ app.get('/', (_req, res) => {
 /**
  * POST /voice/parse
  * multipart/form-data: audio file field named "audio"
- * Response:
- * {
- *   transcript: string,
- *   intent: 'transaction'|'recurring'|'unknown',
- *   transaction?: { description, amount, date, tags? },
- *   recurring?: { kind, name, amount, cadence, monthlyDay?, weeklyDow? }
- * }
  */
 app.post('/voice/parse', upload.single('audio'), async (req, res) => {
+  const requestId = crypto.randomUUID();
+  const t0 = Date.now();
+
+  const log = (msg, extra) => {
+    const dt = Date.now() - t0;
+    const suffix = extra ? ` ${JSON.stringify(extra)}` : '';
+    console.log(`[voice:${requestId}] +${dt}ms ${msg}${suffix}`);
+  };
+
+  let stage = 'start';
+
   try {
     const file = req.file;
-    if (!file) return res.status(400).json({ error: 'Missing audio file field "audio"' });
+    if (!file) return res.status(400).json({ error: 'Missing audio file field "audio"', requestId });
+
+    log('request received', {
+      bytes: file.size,
+      mime: file.mimetype,
+      name: file.originalname,
+    });
 
     // 1) Transcribe
+    stage = 'transcription_prepare';
+    log('transcription:prepare');
     const audioFile = await toFile(file.buffer, file.originalname || 'audio.m4a', {
       type: file.mimetype || 'audio/m4a',
     });
 
+    stage = 'transcription_call';
+    log('transcription:start');
     const transcription = await withConnResetRetries(() =>
       openai.audio.transcriptions.create({
         file: audioFile,
         model: process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1',
       })
     );
+    log('transcription:done');
 
     const transcript = (transcription?.text || '').trim();
-    if (!transcript) return res.json({ transcript: '', intent: 'unknown' });
+    log('transcription:text', { chars: transcript.length });
+    if (!transcript) return res.json({ transcript: '', intent: 'unknown', requestId, timingsMs: { total: Date.now() - t0 } });
 
     // 2) Extract structured intent
+    stage = 'extract_prepare';
+    log('extract:prepare');
     const system =
       'You extract structured cashflow actions from a short speech transcript. ' +
       'Return ONLY valid JSON. Do not include markdown.';
@@ -142,6 +161,8 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
       `- If ambiguous, intent=unknown.\n\n` +
       `Return JSON that matches this JSON Schema:\n${JSON.stringify(schemaHint)}`;
 
+    stage = 'extract_call';
+    log('extract:start');
     const completion = await withConnResetRetries(() =>
       openai.chat.completions.create({
         model: process.env.OPENAI_EXTRACT_MODEL || 'gpt-4o-mini',
@@ -152,34 +173,51 @@ app.post('/voice/parse', upload.single('audio'), async (req, res) => {
         ],
       })
     );
+    log('extract:done');
 
+    stage = 'extract_parse';
     const content = completion.choices?.[0]?.message?.content?.trim() || '';
 
     let parsed;
     try {
       parsed = JSON.parse(content);
     } catch {
-      // fallback: still return transcript so app can show error
-      return res.json({ transcript, intent: 'unknown' });
+      log('extract:json_parse_failed', { sample: content.slice(0, 120) });
+      return res.json({ transcript, intent: 'unknown', requestId, timingsMs: { total: Date.now() - t0 } });
     }
 
-    // Force transcript to be our actual transcript.
     parsed.transcript = transcript;
+    parsed.requestId = requestId;
 
-    // Small normalizations
     if (parsed.intent === 'recurring' && parsed.recurring) {
-      // Ensure amount positive for recurring payload
       const amt = Number(parsed.recurring.amount);
       if (Number.isFinite(amt)) parsed.recurring.amount = Math.abs(amt);
     }
 
+    const total = Date.now() - t0;
+    log('success', { totalMs: total });
+
+    parsed.timingsMs = {
+      total,
+    };
+
     return res.json(parsed);
   } catch (e) {
-    console.error(e);
+    const total = Date.now() - t0;
     const code = e?.cause?.code || e?.code;
+    log('error', {
+      stage,
+      code,
+      message: String(e?.message || ''),
+      totalMs: total,
+    });
+    console.error(e);
     return res.status(500).json({
       error: e?.message || 'Unknown error',
       code,
+      stage,
+      requestId,
+      timingsMs: { total },
     });
   }
 });
