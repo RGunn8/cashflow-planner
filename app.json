@@ -33,7 +33,13 @@
     "plugins": [
       "expo-router",
       "@react-native-community/datetimepicker",
-      "expo-audio"
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Cash Calendar to import transaction screenshots from your photo library.",
+          "cameraPermission": "Allow Cash Calendar to take a photo of your bank activity."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

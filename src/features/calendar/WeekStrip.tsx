@@ -1,13 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Pressable, Text, View } from 'react-native';
-import Animated, {
-  FadeInDown,
-  FadeOutUp,
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming,
-} from 'react-native-reanimated';
+import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 import { useAppStore } from '@/src/state/useAppStore';
@@ -51,26 +45,61 @@ function lineTextClass(kind: WeekStripLine['kind']) {
   }
 }
 
+const ICON_INCOME = '#16a34a'; // emerald-600
+const ICON_BILL = '#e11d48'; // rose-600
+const ICON_GOAL = '#d97706'; // amber-600
+
 function DayCell(props: {
   iso: string;
   isSelected: boolean;
   summary: WeekStripSummary | undefined;
   onPress: () => void;
+  /** Muted when this day is padding outside the focused month (month view). */
+  outsideFocusMonth?: boolean;
 }) {
-  const { iso: d, isSelected, summary } = props;
+  const { iso: d, isSelected, summary, outsideFocusMonth } = props;
   const lines = summary?.lines?.slice(0, 3) ?? [];
+  const hasIncome = lines.some((ln) => ln.kind === 'income');
+  const hasBill = lines.some((ln) => ln.kind === 'bill');
+  const hasGoal = lines.some((ln) => ln.kind === 'goal');
+
+  const mute = Boolean(outsideFocusMonth) && !isSelected;
 
   return (
     <Pressable className="flex-1 items-center justify-center rounded-xl py-2" onPress={props.onPress}>
-      <Text className={isSelected ? 'text-xs font-semibold text-emerald-800' : 'text-xs text-neutral-500'}>
+      <Text
+        className={
+          isSelected
+            ? 'text-xs font-semibold text-emerald-800'
+            : mute
+              ? 'text-xs text-neutral-400'
+              : 'text-xs text-neutral-500'
+        }
+      >
         {formatWeekdayShort(d)}
       </Text>
-      <Text className={isSelected ? 'mt-1 text-base font-bold text-emerald-800' : 'mt-1 text-base font-semibold text-neutral-800'}>
+      <Text
+        className={
+          isSelected
+            ? 'mt-1 text-base font-bold text-emerald-800'
+            : mute
+              ? 'mt-1 text-base font-semibold text-neutral-400'
+              : 'mt-1 text-base font-semibold text-neutral-800'
+        }
+      >
         {d.slice(8, 10)}
       </Text>
 
+      {hasIncome || hasBill || hasGoal ? (
+        <View className={`mt-1 flex-row items-center justify-center gap-1 ${mute ? 'opacity-60' : ''}`}>
+          {hasIncome ? <Ionicons name="trending-up" size={13} color={ICON_INCOME} /> : null}
+          {hasBill ? <Ionicons name="receipt-outline" size={13} color={ICON_BILL} /> : null}
+          {hasGoal ? <Ionicons name="flag" size={13} color={ICON_GOAL} /> : null}
+        </View>
+      ) : null}
+
       {lines.length > 0 ? (
-        <View className="mt-1 w-full items-center gap-0.5 px-0.5">
+        <View className={`mt-1 w-full items-center gap-0.5 px-0.5 ${mute ? 'opacity-70' : ''}`}>
           {lines.map((ln, idx) => (
             <View key={`${ln.kind}-${idx}`} className="flex-row items-center justify-center gap-1">
               <View className="flex-row gap-0.5">
@@ -88,9 +117,11 @@ function DayCell(props: {
           ) : null}
         </View>
       ) : typeof summary?.eodBalance === 'number' ? (
-        <Text className="mt-1 text-[10px] font-semibold text-neutral-600">{formatCompactCurrency(summary.eodBalance)}</Text>
+        <Text className={`mt-1 text-[10px] font-semibold ${mute ? 'text-neutral-400' : 'text-neutral-600'}`}>
+          {formatCompactCurrency(summary.eodBalance)}
+        </Text>
       ) : (
-        <Text className="mt-1 text-[10px] text-neutral-400">—</Text>
+        <Text className={`mt-1 text-[10px] ${mute ? 'text-neutral-300' : 'text-neutral-400'}`}>—</Text>
       )}
     </Pressable>
   );
@@ -101,13 +132,15 @@ function WeekRow(props: {
   selectedDay: string;
   setSelectedDay: (d: string) => void;
   summaries?: Record<string, WeekStripSummary>;
+  monthFocusBounds?: { from: string; to: string };
 }) {
   const [rowWidth, setRowWidth] = useState(0);
+  const colCount = Math.max(1, props.days.length);
   const selectedIndex = Math.max(0, props.days.indexOf(props.selectedDay));
   const isRowActive = props.days.includes(props.selectedDay);
 
   const indicatorX = useSharedValue(0);
-  const cellW = rowWidth > 0 ? rowWidth / 7 : 0;
+  const cellW = rowWidth > 0 ? rowWidth / colCount : 0;
 
   useEffect(() => {
     if (!isRowActive) return;
@@ -124,20 +157,31 @@ function WeekRow(props: {
   return (
     <View className="relative flex-row" onLayout={(e) => setRowWidth(e.nativeEvent.layout.width)}>
       <Animated.View className="absolute top-0 h-full rounded-xl bg-emerald-500/10" style={indicatorStyle} />
-      {props.days.map((d) => (
-        <DayCell
-          key={d}
-          iso={d}
-          isSelected={d === props.selectedDay}
-          summary={props.summaries?.[d]}
-          onPress={() => props.setSelectedDay(d)}
-        />
-      ))}
+      {props.days.map((d) => {
+        const b = props.monthFocusBounds;
+        const outside =
+          b && (d < b.from || d > b.to) ? true : false;
+        return (
+          <DayCell
+            key={d}
+            iso={d}
+            isSelected={d === props.selectedDay}
+            summary={props.summaries?.[d]}
+            onPress={() => props.setSelectedDay(d)}
+            outsideFocusMonth={outside}
+          />
+        );
+      })}
     </View>
   );
 }
 
-export function WeekStrip(props: { summaries?: Record<string, WeekStripSummary>; days?: string[] }) {
+export function WeekStrip(props: {
+  summaries?: Record<string, WeekStripSummary>;
+  days?: string[];
+  /** When set, days outside [from, to] render muted (padding weeks for month grid). */
+  monthFocusBounds?: { from: string; to: string };
+}) {
   const selectedDay = useAppStore((s) => s.selectedDay);
   const setSelectedDay = useAppStore((s) => s.setSelectedDay);
 
@@ -145,11 +189,15 @@ export function WeekStrip(props: { summaries?: Record<string, WeekStripSummary>;
   const computedDays = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(computedWeekStart, i)), [computedWeekStart]);
 
   const days = props.days && props.days.length ? props.days : computedDays;
-  const row1 = days.slice(0, 7);
-  const row2 = days.slice(7, 14);
-  const showSecondRow = row2.length > 0;
+  const weekRows = useMemo(() => {
+    const rows: string[][] = [];
+    for (let i = 0; i < days.length; i += 7) {
+      rows.push(days.slice(i, i + 7));
+    }
+    return rows;
+  }, [days]);
 
-  // Pan gesture shifts by week (7). Header arrows handle 7/14 paging.
+  // Pan gesture shifts by week (7). Header arrows handle 7/14/month paging.
   const shiftDay = useMemo(() => {
     return (day: string, delta: number) => {
       setSelectedDay(addDays(day, delta));
@@ -172,13 +220,16 @@ export function WeekStrip(props: { summaries?: Record<string, WeekStripSummary>;
     <GestureDetector gesture={pan}>
       <View className="rounded-2xl bg-white px-2 py-3">
         <View className="gap-2">
-          <WeekRow days={row1} selectedDay={selectedDay} setSelectedDay={setSelectedDay} summaries={props.summaries} />
-
-          {showSecondRow ? (
-            <Animated.View entering={FadeInDown.duration(150)} exiting={FadeOutUp.duration(120)}>
-              <WeekRow days={row2} selectedDay={selectedDay} setSelectedDay={setSelectedDay} summaries={props.summaries} />
-            </Animated.View>
-          ) : null}
+          {weekRows.map((rowDays, idx) => (
+            <WeekRow
+              key={`${rowDays[0]}-${idx}`}
+              days={rowDays}
+              selectedDay={selectedDay}
+              setSelectedDay={setSelectedDay}
+              summaries={props.summaries}
+              monthFocusBounds={props.monthFocusBounds}
+            />
+          ))}
         </View>
       </View>
     </GestureDetector>

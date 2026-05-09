@@ -6,7 +6,7 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import 'react-native-reanimated';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
@@ -14,6 +14,8 @@ import { useColorScheme } from '@/components/useColorScheme';
 import { db, isInstantConfigured } from '@/src/db/instant';
 import { InstantSetupScreen } from '@/src/features/setup/InstantSetupScreen';
 import { AppProviders } from '@/src/providers/AppProviders';
+import { getAlwaysShowOnboarding, getOnboardingComplete } from '@/src/state/onboardingStorage';
+import { useAppStore } from '@/src/state/useAppStore';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -60,19 +62,82 @@ function RootLayoutNav() {
 
   const auth = db?.useAuth?.();
 
+  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
+  const alwaysShowOnboarding = useAppStore((s) => s.alwaysShowOnboarding);
+  const setAlwaysShowOnboarding = useAppStore((s) => s.setAlwaysShowOnboarding);
+  const sessionOnboardingUid = useAppStore((s) => s.sessionOnboardingCompleteUserId);
+  const onboardingStorageEpoch = useAppStore((s) => s.onboardingStorageEpoch);
+  const clearSessionOnboardingComplete = useAppStore((s) => s.clearSessionOnboardingComplete);
+
+  useEffect(() => {
+    let c = false;
+    getAlwaysShowOnboarding().then((v) => {
+      if (!c) setAlwaysShowOnboarding(v);
+    });
+    return () => {
+      c = true;
+    };
+  }, [setAlwaysShowOnboarding]);
+
+  useEffect(() => {
+    const uid = auth?.user?.id as string | undefined;
+    if (!uid) {
+      setOnboardingDone(null);
+      clearSessionOnboardingComplete();
+      return;
+    }
+    const sessionUid = useAppStore.getState().sessionOnboardingCompleteUserId;
+    if (sessionUid !== null && sessionUid !== uid) {
+      clearSessionOnboardingComplete();
+    }
+    let cancelled = false;
+    getOnboardingComplete(uid).then((v) => {
+      if (!cancelled) setOnboardingDone(v);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.user?.id, onboardingStorageEpoch, clearSessionOnboardingComplete]);
+
   useEffect(() => {
     if (!isInstantConfigured || !db) return;
     if (!auth || auth.isLoading) return;
+    if (auth.user?.id && onboardingDone === null) return;
 
     const inAuthGroup = segment0 === '(auth)';
+    const inOnboarding = segment0 === '(onboarding)';
     const isSignedIn = Boolean(auth.user);
+
+    const uid = auth.user?.id as string | undefined;
+    const onboardingComplete =
+      onboardingDone === true ||
+      (Boolean(uid) && sessionOnboardingUid === uid);
+
+    const sendToTabsAfterSignIn = !alwaysShowOnboarding && onboardingComplete;
 
     if (!isSignedIn && !inAuthGroup) {
       router.replace('/(auth)/sign-in');
     } else if (isSignedIn && inAuthGroup) {
+      router.replace(sendToTabsAfterSignIn ? '/(tabs)' : '/(onboarding)');
+    } else if (isSignedIn && !onboardingComplete && !inOnboarding && !inAuthGroup) {
+      router.replace('/(onboarding)');
+    } else if (
+      isSignedIn &&
+      onboardingComplete &&
+      inOnboarding &&
+      !alwaysShowOnboarding
+    ) {
       router.replace('/(tabs)');
     }
-  }, [auth?.isLoading, auth?.user, router, segment0]);
+  }, [
+    auth?.isLoading,
+    auth?.user,
+    router,
+    segment0,
+    onboardingDone,
+    alwaysShowOnboarding,
+    sessionOnboardingUid,
+  ]);
 
   useEffect(() => {
     if (!isInstantConfigured || !db) return;
@@ -101,6 +166,7 @@ function RootLayoutNav() {
           <Stack>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+            <Stack.Screen name="(onboarding)" options={{ headerShown: false }} />
             <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
           </Stack>
         </GestureHandlerRootView>

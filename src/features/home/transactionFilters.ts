@@ -9,7 +9,7 @@ export function isWhatIfTxn(t: Transaction): boolean {
 /** True if this transaction row is one half of a transfer pair. */
 export function isTransferTxn(t: Transaction): boolean {
   if ((t as any).transferId) return true;
-  return t.matchStatus === 'transfer';
+  return false;
 }
 
 /** Income / Bills / Goals section for a what-if row when kind is missing or legacy data (matches projection bucketing). */

@@ -36,15 +36,22 @@ function amountClassForKind(kind: Extract<DayDetailItem, { type: 'row' }>['kind'
   }
 }
 
-export function DayDetailList(props: { items: DayDetailItem[] }) {
+export function DayDetailList(props: {
+  items: DayDetailItem[];
+  /** Renders above day rows; scrolls with the list so the whole Home screen can scroll. */
+  ListHeaderComponent?: React.ReactElement | null;
+}) {
   const data = useMemo(() => props.items ?? [], [props.items]);
 
   return (
     <FlashList
       className="flex-1"
       data={data}
+      ListHeaderComponent={props.ListHeaderComponent ?? undefined}
       keyExtractor={(item) => item.id}
+      keyboardShouldPersistTaps="handled"
       ItemSeparatorComponent={() => <View className="h-px bg-neutral-100" />}
+      contentContainerStyle={{ flexGrow: 1, paddingBottom: 32 }}
       ListEmptyComponent={() => (
         <View className="px-4 py-6">
           <Text className="text-sm text-neutral-500">No activity for this day.</Text>

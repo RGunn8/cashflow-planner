@@ -6,19 +6,26 @@ import type { Transaction } from '@/src/db/types';
 import { qk } from '@/src/query/keys';
 import { useUserId } from '@/src/query/hooks/useUserId';
 import { toIsoDate } from '@/src/utils/dates';
+import { useInstantMirror } from '@/src/query/hooks/useInstantMirror';
+import { isWhatIfTxn } from '@/src/features/home/transactionFilters';
 
 /** All what-if transactions for the signed-in user (for counts + bulk delete). */
 export function useWhatIfTransactions() {
   const userId = useUserId();
   const queryClient = useQueryClient();
-  const lastSig = useRef<string>('');
   const lastCleanupSig = useRef<string>('');
 
-  useEffect(() => {
-    lastSig.current = '';
-  }, [userId]);
-
   const instant: any = db?.useQuery(
+    (userId
+      ? {
+          transactions: {
+            $: { where: { userId, isWhatIf: true } },
+          },
+        }
+      : {}) as any
+  );
+
+  const legacyInstant: any = db?.useQuery(
     (userId
       ? {
           transactions: {
@@ -28,7 +35,9 @@ export function useWhatIfTransactions() {
       : {}) as any
   );
 
-  const rows = (instant?.data?.transactions ?? []) as Transaction[];
+  const rowsA = (instant?.data?.transactions ?? []) as Transaction[];
+  const rowsB = (legacyInstant?.data?.transactions ?? []) as Transaction[];
+  const rows = dedupeById([...rowsA, ...rowsB]).filter(isWhatIfTxn);
   const todayIso = toIsoDate(new Date());
   const visible = rows.filter((r) => String(r.postedAt ?? '').slice(0, 10) >= todayIso);
   const past = rows.filter((r) => String(r.postedAt ?? '').slice(0, 10) < todayIso);
@@ -48,14 +57,13 @@ export function useWhatIfTransactions() {
       });
   }, [past, userId, todayIso]);
 
-  useEffect(() => {
-    if (!userId) return;
-    const sig = visible.map((r) => r.id).join('|');
-    if (lastSig.current === sig) return;
-    lastSig.current = sig;
+  useInstantMirror({
+    enabled: Boolean(userId),
+    queryClient,
     // Back-compat with newer key signature: scenarioId omitted means base.
-    queryClient.setQueryData((qk as any).whatIfTransactions(userId), visible);
-  }, [queryClient, userId, visible]);
+    queryKey: userId ? (qk as any).whatIfTransactions(userId) : ['whatIfTransactions', 'none'],
+    rows: visible,
+  });
 
   const query = useQuery({
     queryKey: userId ? (qk as any).whatIfTransactions(userId) : ['whatIfTransactions', 'none'],
@@ -67,7 +75,13 @@ export function useWhatIfTransactions() {
   return {
     ...query,
     data: (query.data ?? visible) as Transaction[],
-    isLoading: Boolean(userId) && Boolean(instant?.isLoading),
-    error: instant?.error ?? null,
+    isLoading: Boolean(userId) && (Boolean(instant?.isLoading) || Boolean(legacyInstant?.isLoading)),
+    error: instant?.error ?? legacyInstant?.error ?? null,
   };
+}
+
+function dedupeById<T extends { id: string }>(rows: T[]): T[] {
+  const map = new Map<string, T>();
+  for (const r of rows) map.set(r.id, r);
+  return Array.from(map.values());
 }

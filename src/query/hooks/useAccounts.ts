@@ -1,15 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
 
 import { db } from '@/src/db/instant';
 import type { Account } from '@/src/db/types';
 import { qk } from '@/src/query/keys';
 import { useUserId } from '@/src/query/hooks/useUserId';
+import { useInstantMirror } from '@/src/query/hooks/useInstantMirror';
 
 export function useAccounts() {
   const userId = useUserId();
   const queryClient = useQueryClient();
-  const lastSig = useRef<string>('');
 
   const instant: any = db?.useQuery(
     (userId
@@ -23,13 +22,12 @@ export function useAccounts() {
 
   const accounts = (instant?.data?.accounts ?? []) as Account[];
 
-  useEffect(() => {
-    if (!userId) return;
-    const sig = accounts.map((a) => a.id).join('|');
-    if (lastSig.current === sig) return;
-    lastSig.current = sig;
-    queryClient.setQueryData(qk.accounts(userId), accounts);
-  }, [accounts, queryClient, userId]);
+  useInstantMirror({
+    enabled: Boolean(userId),
+    queryClient,
+    queryKey: userId ? qk.accounts(userId) : ['accounts', 'none'],
+    rows: accounts,
+  });
 
   const query = useQuery({
     queryKey: userId ? qk.accounts(userId) : ['accounts', 'none'],

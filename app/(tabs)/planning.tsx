@@ -5,6 +5,7 @@ import { useRouter } from 'expo-router';
 
 import { db } from '@/src/db/instant';
 import { materializeScheduledEvents } from '@/src/features/planning/materialize';
+import { BulkAddModal, type BulkAddSaveParams } from '@/src/features/transactions/BulkAddModal';
 import { useAccounts } from '@/src/query/hooks/useAccounts';
 import { useGoals } from '@/src/query/hooks/useGoals';
 import { useRecurringRules } from '@/src/query/hooks/useRecurringRules';
@@ -17,13 +18,18 @@ import { formatUsd } from '@/src/utils/money';
 type Kind = 'income' | 'bill' | 'transfer';
 type Cadence = 'weekly' | 'biweekly' | 'monthly';
 
-function HeaderBar(props: { title: string; onAdd: () => void }) {
+function HeaderBar(props: { title: string; onAdd: () => void; onBulkAddBills: () => void }) {
   return (
     <View className="flex-row items-center justify-between">
       <Text className="text-lg font-semibold text-neutral-900">{props.title}</Text>
-      <Pressable className="rounded-xl bg-emerald-600 px-3 py-2" onPress={props.onAdd}>
-        <Text className="text-xs font-semibold text-white">Add</Text>
-      </Pressable>
+      <View className="flex-row gap-2">
+        <Pressable className="rounded-xl bg-neutral-900 px-3 py-2" onPress={props.onBulkAddBills}>
+          <Text className="text-xs font-semibold text-white">Bulk bills</Text>
+        </Pressable>
+        <Pressable className="rounded-xl bg-emerald-600 px-3 py-2" onPress={props.onAdd}>
+          <Text className="text-xs font-semibold text-white">Add</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -42,6 +48,44 @@ function RuleRow(props: { rule: any; amountClass: string; amountText: string }) 
       <Text className={props.amountClass}>{props.amountText}</Text>
     </View>
   );
+}
+
+type PlanSortKey = 'date' | 'amount';
+
+function PlanSortBar(props: { sortBy: PlanSortKey; onSortBy: (k: PlanSortKey) => void }) {
+  function Opt({ label, k }: { label: string; k: PlanSortKey }) {
+    const active = props.sortBy === k;
+    return (
+      <Pressable
+        className={active ? 'rounded-lg bg-neutral-900 px-2.5 py-1.5' : 'rounded-lg bg-neutral-100 px-2.5 py-1.5'}
+        onPress={() => props.onSortBy(k)}
+      >
+        <Text className={active ? 'text-xs font-semibold text-white' : 'text-xs font-semibold text-neutral-600'}>{label}</Text>
+      </Pressable>
+    );
+  }
+
+  return (
+    <View className="flex-row flex-wrap items-center gap-2 border-b border-neutral-100 bg-white px-4 py-3">
+      <Text className="text-xs font-semibold text-neutral-500">Sort</Text>
+      <Opt label="Date" k="date" />
+      <Opt label="Amount" k="amount" />
+    </View>
+  );
+}
+
+function compareRecurringRules(a: any, b: any, sortBy: PlanSortKey): number {
+  if (sortBy === 'amount') {
+    return Math.abs(Number(b.amount ?? 0)) - Math.abs(Number(a.amount ?? 0));
+  }
+  return String(a.nextRunAt ?? '').localeCompare(String(b.nextRunAt ?? ''));
+}
+
+function compareGoals(a: any, b: any, sortBy: PlanSortKey): number {
+  if (sortBy === 'amount') {
+    return Number(b.targetAmount ?? 0) - Number(a.targetAmount ?? 0);
+  }
+  return String(a.targetDate ?? '').localeCompare(String(b.targetDate ?? ''));
 }
 
 function RulesSection(props: { title: string; emptyText: string; children?: React.ReactNode }) {
@@ -266,7 +310,7 @@ function CreateRuleModal(props: {
 
 function toIsoDateUTC(d: Date): string {
   // Using UTC keeps behavior stable across timezones and matches existing `toIsoDate` usage elsewhere.
-  return d.toISOString().slice(0, 10);
+  return toIsoDate(d);
 }
 
 function startOfTodayUTC(): Date {
@@ -485,6 +529,7 @@ export default function PlanningScreen() {
   const rulesQ = useRecurringRules();
   const goalsQ = useGoals();
 
+  const [bulkBillsOpen, setBulkBillsOpen] = useState(false);
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<Kind>('bill');
   const [name, setName] = useState('');
@@ -518,7 +563,8 @@ export default function PlanningScreen() {
   }, [pendingRecurringDraft]);
 
   const accounts = accountsQ.data ?? [];
-  const goals = goalsQ.data ?? [];
+
+  const [planSort, setPlanSort] = useState<PlanSortKey>('date');
 
   const [goalOpen, setGoalOpen] = useState(false);
   const [goalName, setGoalName] = useState('');
@@ -545,11 +591,63 @@ export default function PlanningScreen() {
     };
   }, [rulesQ.data]);
 
+  const sortedIncome = useMemo(() => {
+    const arr = grouped.income.slice().sort((a, b) => compareRecurringRules(a, b, planSort));
+    return arr;
+  }, [grouped.income, planSort]);
+
+  const sortedBills = useMemo(() => {
+    return grouped.bills.slice().sort((a, b) => compareRecurringRules(a, b, planSort));
+  }, [grouped.bills, planSort]);
+
+  const sortedTransfers = useMemo(() => {
+    return grouped.transfers.slice().sort((a, b) => compareRecurringRules(a, b, planSort));
+  }, [grouped.transfers, planSort]);
+
+  const sortedGoals = useMemo(() => {
+    return (goalsQ.data ?? []).slice().sort((a, b) => compareGoals(a, b, planSort));
+  }, [goalsQ.data, planSort]);
+
   const accountNameById = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of accounts) m.set(a.id, (a as any).name ?? 'Account');
     return m;
   }, [accounts]);
+
+  async function saveBulkBills(params: BulkAddSaveParams) {
+    if (params.mode !== 'bills') return;
+    const client = db;
+    if (!client || !userId) return;
+    try {
+      const { accountId, cadence, weeklyDow, monthlyDay, rows } = params;
+      const startDate = cadence === 'monthly' ? nextMonthDayFromTodayUTC(monthlyDay) : nextWeekdayFromTodayUTC(weeklyDow);
+
+      const txs: any[] = [];
+      for (const row of rows) {
+        const id = newId();
+        const amt = Math.abs(row.amount);
+        const rule: any = {
+          id,
+          userId,
+          accountId,
+          kind: 'bill',
+          name: row.description.trim() || 'Bill',
+          amount: amt,
+          cadence,
+          startDate,
+          nextRunAt: startDate,
+        };
+        const scheduled = materializeScheduledEvents({ rule: rule as any, userId });
+        txs.push(client.tx.recurringRules[id].update(rule));
+        txs.push(...scheduled.map((e) => client.tx.scheduledEvents[e.id].update(e)));
+      }
+
+      await client.transact(txs);
+    } catch (e: any) {
+      Alert.alert('Could not add bills', e?.message ?? 'Unknown error');
+      throw e;
+    }
+  }
 
   async function createRule() {
     if (!db || !userId || !accountId) return;
@@ -659,6 +757,14 @@ export default function PlanningScreen() {
       <View className="px-4 pb-3 pt-14">
         <HeaderBar
           title="Planning"
+          onBulkAddBills={() => {
+            if (!accounts.length) {
+              Alert.alert('Create an account first', 'Add an account in the Accounts tab, then create recurring rules.');
+              return;
+            }
+            setAccountId(accounts[0].id);
+            setBulkBillsOpen(true);
+          }}
           onAdd={() => {
             if (!accounts.length) {
               Alert.alert('Create an account first', 'Add an account in the Accounts tab, then create recurring rules.');
@@ -671,9 +777,11 @@ export default function PlanningScreen() {
       </View>
 
       <View className="flex-1 overflow-hidden rounded-t-3xl bg-white">
+        <PlanSortBar sortBy={planSort} onSortBy={setPlanSort} />
+
         <RulesSection title="Recurring income" emptyText="No recurring income yet.">
-          {grouped.income.length
-            ? grouped.income.map((r) => (
+          {sortedIncome.length
+            ? sortedIncome.map((r) => (
                 <RuleRow
                   key={r.id}
                   rule={r}
@@ -685,8 +793,8 @@ export default function PlanningScreen() {
         </RulesSection>
 
         <RulesSection title="Recurring bills" emptyText="No recurring bills yet.">
-          {grouped.bills.length
-            ? grouped.bills.map((r) => (
+          {sortedBills.length
+            ? sortedBills.map((r) => (
                 <RuleRow
                   key={r.id}
                   rule={r}
@@ -698,8 +806,8 @@ export default function PlanningScreen() {
         </RulesSection>
 
         <RulesSection title="Recurring transfers" emptyText="No recurring transfers yet.">
-          {grouped.transfers.length
-            ? grouped.transfers.map((r) => {
+          {sortedTransfers.length
+            ? sortedTransfers.map((r) => {
                 const toName = (r as any).toAccountId ? accountNameById.get((r as any).toAccountId) ?? 'Account' : '—';
                 const fromName = accountNameById.get(r.accountId) ?? 'Account';
                 return (
@@ -735,17 +843,25 @@ export default function PlanningScreen() {
             </Pressable>
           </View>
         </View>
-        {goals.length ? (
-          goals
-            .slice()
-            .sort((a: any, b: any) => (String(a.targetDate) < String(b.targetDate) ? -1 : 1))
-            .map((g: any) => <GoalRow key={g.id} goal={g} onOpen={(id) => router.push(`/goals/${id}`)} />)
+        {sortedGoals.length ? (
+          sortedGoals.map((g: any) => <GoalRow key={g.id} goal={g} onOpen={(id) => router.push(`/goals/${id}`)} />)
         ) : (
           <View className="bg-white px-4 py-4">
             <Text className="text-sm text-neutral-500">No goals yet. Add one to track progress.</Text>
           </View>
         )}
       </View>
+
+      <BulkAddModal
+        mode="bills"
+        open={bulkBillsOpen}
+        onClose={() => setBulkBillsOpen(false)}
+        accounts={accounts.map((a: any) => ({ id: a.id, name: String(a.name ?? 'Account') }))}
+        accountId={accountId}
+        setAccountId={(id) => setAccountId(id)}
+        defaultDate={toIsoDate(new Date())}
+        onSave={saveBulkBills}
+      />
 
       <CreateRuleModal
         open={open}

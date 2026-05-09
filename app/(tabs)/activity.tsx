@@ -11,23 +11,18 @@ import {
 } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
-import { useRouter } from 'expo-router';
-
 import { db } from '@/src/db/instant';
 import type { Transaction } from '@/src/db/types';
-import { bestMatch, candidatesForTransaction } from '@/src/features/matching/match';
+import { BulkAddModal, type BulkAddSaveParams, type BulkSaveRow } from '@/src/features/transactions/BulkAddModal';
 import { isWhatIfTxn } from '@/src/features/home/transactionFilters';
-import { VoiceAddModal, type VoiceParseResponse } from '@/src/features/voice/VoiceAddModal';
 import { TagAutocompleteField } from '@/src/features/transactions/TagAutocompleteField';
 import { useAccounts } from '@/src/query/hooks/useAccounts';
-import { useScheduledEvents } from '@/src/query/hooks/useScheduledEvents';
 import { useTransactionTags } from '@/src/query/hooks/useTransactionTags';
 import { useUserId } from '@/src/query/hooks/useUserId';
-import { useAppStore } from '@/src/state/useAppStore';
 import { addDays, parseIsoDate, toIsoDate } from '@/src/utils/dates';
 import { newId } from '@/src/utils/uuid';
 
-function HeaderBar(props: { title: string; subtitle: string; onAdd: () => void; onVoice: () => void }) {
+function HeaderBar(props: { title: string; subtitle: string; onAdd: () => void; onBulkAdd: () => void }) {
   return (
     <View className="flex-row items-center justify-between">
       <View>
@@ -35,8 +30,8 @@ function HeaderBar(props: { title: string; subtitle: string; onAdd: () => void; 
         <Text className="mt-1 text-xs text-neutral-500">{props.subtitle}</Text>
       </View>
       <View className="flex-row gap-2">
-        <Pressable className="rounded-xl bg-neutral-900 px-3 py-2" onPress={props.onVoice}>
-          <Text className="text-xs font-semibold text-white">Voice</Text>
+        <Pressable className="rounded-xl bg-neutral-900 px-3 py-2" onPress={props.onBulkAdd}>
+          <Text className="text-xs font-semibold text-white">Bulk add</Text>
         </Pressable>
         <Pressable className="rounded-xl bg-emerald-600 px-3 py-2" onPress={props.onAdd}>
           <Text className="text-xs font-semibold text-white">Add txn</Text>
@@ -46,7 +41,7 @@ function HeaderBar(props: { title: string; subtitle: string; onAdd: () => void; 
   );
 }
 
-function TransactionsList(props: { txns: any[]; onMatch: (id: string) => void }) {
+function TransactionsList(props: { txns: any[] }) {
   return (
     <View className="flex-1 overflow-hidden rounded-t-3xl bg-white">
       <FlashList
@@ -55,35 +50,28 @@ function TransactionsList(props: { txns: any[]; onMatch: (id: string) => void })
         ItemSeparatorComponent={() => <View className="h-px bg-neutral-100" />}
         ListEmptyComponent={() => (
           <View className="px-4 py-6">
-            <Text className="text-sm text-neutral-500">No transactions yet. Add one to test matching.</Text>
+            <Text className="text-sm text-neutral-500">No transactions yet. Add one from here or the home screen.</Text>
           </View>
         )}
         renderItem={({ item }) => {
           const isWhatIf = isWhatIfTxn(item as Transaction);
           const matched = item.matchStatus === 'matched' && item.matchedEventId;
           const tags = Array.isArray(item.tags) ? (item.tags as string[]) : [];
-          const statusLabel = isWhatIf ? 'What-if' : matched ? 'Matched' : 'Needs review';
+          const statusParts: string[] = [];
+          if (isWhatIf) statusParts.push('What-if');
+          if (matched) statusParts.push('Matched');
+          const meta = [item.postedAt.slice(0, 10), ...statusParts, ...(tags.length ? [tags.join(', ')] : [])].filter(Boolean).join(' • ');
           return (
             <View className="flex-row items-center justify-between bg-white px-4 py-3">
               <View className="flex-1 pr-3">
                 <Text className="text-sm font-semibold text-neutral-900" numberOfLines={1}>
                   {item.description || 'Transaction'}
                 </Text>
-                <Text className="mt-0.5 text-xs text-neutral-500">
-                  {item.postedAt.slice(0, 10)} • {statusLabel}
-                  {tags.length ? ` • ${tags.join(', ')}` : ''}
-                </Text>
+                <Text className="mt-0.5 text-xs text-neutral-500">{meta}</Text>
               </View>
-              <View className="items-end">
-                <Text className={item.amount >= 0 ? 'text-sm font-semibold text-emerald-700' : 'text-sm font-semibold text-rose-700'}>
-                  {item.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
-                </Text>
-                {!matched && !isWhatIf ? (
-                  <Pressable className="mt-1 rounded-xl bg-neutral-900 px-3 py-1.5" onPress={() => props.onMatch(item.id)}>
-                    <Text className="text-[11px] font-semibold text-white">Match</Text>
-                  </Pressable>
-                ) : null}
-              </View>
+              <Text className={item.amount >= 0 ? 'text-sm font-semibold text-emerald-700' : 'text-sm font-semibold text-rose-700'}>
+                {item.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+              </Text>
             </View>
           );
         }}
@@ -226,66 +214,14 @@ function AddTransactionModal(props: {
   );
 }
 
-function MatchModal(props: {
-  open: boolean;
-  txn: any | null;
-  candidates: any[];
-  onClose: () => void;
-  onPick: (eventId: string) => void;
-}) {
-  if (!props.open || !props.txn) return null;
-  return (
-    <View className="absolute inset-0 bg-black/30">
-      <View className="mx-4 mt-20 max-h-[70%] rounded-2xl bg-white p-4">
-        <View className="flex-row items-center justify-between">
-          <Text className="text-base font-semibold text-neutral-900">Match transaction</Text>
-          <Pressable onPress={props.onClose}>
-            <Text className="text-sm font-semibold text-neutral-600">Close</Text>
-          </Pressable>
-        </View>
-        <Text className="mt-2 text-xs text-neutral-500">
-          {props.txn.description} • {props.txn.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
-        </Text>
-
-        <View className="mt-4 overflow-hidden rounded-xl border border-neutral-100">
-          <FlashList
-            data={props.candidates.slice(0, 20)}
-            keyExtractor={(c) => c.event.id}
-            ItemSeparatorComponent={() => <View className="h-px bg-neutral-100" />}
-            ListEmptyComponent={() => (
-              <View className="px-4 py-6">
-                <Text className="text-sm text-neutral-500">No candidates found (try adding scheduled events in Planning).</Text>
-              </View>
-            )}
-            renderItem={({ item }) => (
-              <Pressable className="bg-white px-4 py-3" onPress={() => props.onPick(item.event.id)}>
-                <Text className="text-sm font-semibold text-neutral-900">
-                  {item.event.kind} • {item.event.date}
-                </Text>
-                <Text className="mt-0.5 text-xs text-neutral-500">
-                  {item.event.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })} • score {item.score}
-                </Text>
-              </Pressable>
-            )}
-          />
-        </View>
-      </View>
-    </View>
-  );
-}
-
 export default function ActivityScreen() {
-  const router = useRouter();
   const userId = useUserId();
   const accountsQ = useAccounts();
   const accounts = accountsQ.data ?? [];
 
-  const setPendingRecurringDraft = useAppStore((s) => s.setPendingRecurringDraft);
-
   const today = toIsoDate(new Date());
   const fromDay = addDays(today, -365);
   const toDay = today;
-  const rangeKey = `${fromDay}_${toDay}`;
 
   // Query all transactions for the user and filter client-side.
   const instantTxns: any = db?.useQuery(
@@ -309,23 +245,13 @@ export default function ActivityScreen() {
     return txnsAll.filter((t) => (t.postedAt ?? '') >= from && (t.postedAt ?? '') <= to);
   }, [fromDay, toDay, txnsAll]);
 
-  const eventsQ = useScheduledEvents({ rangeKey, from: fromDay, to: toDay });
-
   const [open, setOpen] = useState(false);
-  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [date, setDate] = useState(today);
   const [desc, setDesc] = useState('');
   const [amount, setAmount] = useState('');
   const [tags, setTags] = useState('');
   const [accountId, setAccountId] = useState<string | null>(accounts[0]?.id ?? null);
-
-  const [matchTxnId, setMatchTxnId] = useState<string | null>(null);
-
-  const matchTxn = useMemo(() => txnsInRange.find((t) => t.id === matchTxnId) ?? null, [matchTxnId, txnsInRange]);
-  const candidates = useMemo(() => {
-    if (!matchTxn) return [];
-    return candidatesForTransaction({ txn: matchTxn, events: eventsQ.data ?? [] });
-  }, [eventsQ.data, matchTxn]);
 
   const tagsQ = useTransactionTags();
   const knownTags = tagsQ.data ?? [];
@@ -351,18 +277,9 @@ export default function ActivityScreen() {
           .split(',')
           .map((t) => t.trim())
           .filter(Boolean),
-        matchStatus: 'needs_review',
       };
 
-      const maybe = bestMatch({ txn: txn as any, events: (eventsQ.data ?? []) as any });
-
-      const txs: any[] = [db.tx.transactions[id].update(txn)];
-      if (maybe) {
-        txs.push(db.tx.transactions[id].update({ matchStatus: 'matched', matchedEventId: maybe.id }));
-        txs.push(db.tx.scheduledEvents[maybe.id].update({ status: 'matched' }));
-      }
-
-      await db.transact(txs);
+      await db.transact([db.tx.transactions[id].update(txn)]);
       setDate(today);
       setDesc('');
       setAmount('');
@@ -373,37 +290,41 @@ export default function ActivityScreen() {
     }
   }
 
-  async function manualMatch(eventId: string) {
-    if (!db || !matchTxn) return;
-    try {
-      await db.transact([
-        db.tx.transactions[matchTxn.id].update({ matchStatus: 'matched', matchedEventId: eventId }),
-        db.tx.scheduledEvents[eventId].update({ status: 'matched' }),
-      ]);
-      setMatchTxnId(null);
-    } catch (e: any) {
-      Alert.alert('Could not match', e?.message ?? 'Unknown error');
-    }
+  async function handleBulkSave(params: BulkAddSaveParams) {
+    if (params.mode !== 'transactions') return;
+    await saveBulkTransactions({
+      defaultDate: params.defaultDate,
+      accountId: params.accountId,
+      rows: params.rows,
+    });
   }
 
-  function handleVoiceResult(res: VoiceParseResponse) {
-    if (res.intent === 'transaction' && res.transaction) {
-      if (res.transaction.date) setDate(res.transaction.date);
-      if (typeof res.transaction.amount === 'number') setAmount(String(res.transaction.amount));
-      if (res.transaction.description) setDesc(res.transaction.description);
-      if (Array.isArray(res.transaction.tags)) setTags(res.transaction.tags.join(', '));
-      if (res.transaction.accountId) setAccountId(res.transaction.accountId);
-      setOpen(true);
-      return;
-    }
+  async function saveBulkTransactions(params: { defaultDate: string; accountId: string; rows: BulkSaveRow[] }) {
+    const client = db;
+    if (!client || !userId) return;
+    try {
+      const defaultDay = params.defaultDate.trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(defaultDay)) throw new Error('Date must be YYYY-MM-DD');
 
-    if (res.intent === 'recurring' && res.recurring) {
-      setPendingRecurringDraft(res.recurring as any);
-      router.push('/(tabs)/planning');
-      return;
+      const txs = params.rows.map((row) => {
+        const id = newId();
+        const day =
+          row.date && /^\d{4}-\d{2}-\d{2}$/.test(row.date.trim()) ? row.date.trim() : defaultDay;
+        const postedAt = `${day}T12:00:00.000Z`;
+        return client.tx.transactions[id].update({
+          userId,
+          accountId: params.accountId,
+          postedAt,
+          amount: row.amount,
+          description: row.description.trim() || 'Transaction',
+          tags: [],
+        });
+      });
+      await client.transact(txs);
+    } catch (e: any) {
+      Alert.alert('Could not add transactions', e?.message ?? 'Unknown error');
+      throw e;
     }
-
-    Alert.alert('Could not understand', res.transcript || 'Try again.');
   }
 
   if (!db) {
@@ -420,7 +341,14 @@ export default function ActivityScreen() {
         <HeaderBar
           title="Activity"
           subtitle="Last 12 months"
-          onVoice={() => setVoiceOpen(true)}
+          onBulkAdd={() => {
+            if (!accounts.length) {
+              Alert.alert('Create an account first', 'Add an account in the Accounts tab.');
+              return;
+            }
+            setAccountId(accounts[0].id);
+            setBulkOpen(true);
+          }}
           onAdd={() => {
             if (!accounts.length) {
               Alert.alert('Create an account first', 'Add an account in the Accounts tab.');
@@ -433,10 +361,7 @@ export default function ActivityScreen() {
         />
       </View>
 
-      <TransactionsList
-        txns={txnsInRange.slice().sort((a, b) => ((a.postedAt ?? '') < (b.postedAt ?? '') ? 1 : -1))}
-        onMatch={(id) => setMatchTxnId(id)}
-      />
+      <TransactionsList txns={txnsInRange.slice().sort((a, b) => ((a.postedAt ?? '') < (b.postedAt ?? '') ? 1 : -1))} />
 
       <AddTransactionModal
         open={open}
@@ -456,9 +381,15 @@ export default function ActivityScreen() {
         onAdd={addTransaction}
       />
 
-      <VoiceAddModal open={voiceOpen} onClose={() => setVoiceOpen(false)} onResult={handleVoiceResult} />
-
-      <MatchModal open={Boolean(matchTxn)} txn={matchTxn} candidates={candidates} onClose={() => setMatchTxnId(null)} onPick={(eventId) => manualMatch(eventId)} />
+      <BulkAddModal
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        accounts={accounts}
+        accountId={accountId}
+        setAccountId={(id) => setAccountId(id)}
+        defaultDate={today}
+        onSave={handleBulkSave}
+      />
     </View>
   );
 }

@@ -8,6 +8,7 @@ import { toFile } from 'openai/uploads';
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '512kb' }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -31,6 +32,34 @@ const openai = new OpenAI({
   maxRetries: Number(process.env.OPENAI_MAX_RETRIES || 6),
   timeout: Number(process.env.OPENAI_TIMEOUT_MS || 90000),
 });
+
+/** Shared JSON shape for /text/parse and /image/parse-transactions responses. */
+const TRANSACTION_EXTRACT_SCHEMA_HINT = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['transactions'],
+  properties: {
+    transactions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['description', 'amount'],
+        properties: {
+          description: { type: 'string' },
+          amount: {
+            type: 'number',
+            description: 'Signed USD. Spending/bills negative; income/deposits positive.',
+          },
+          date: {
+            type: 'string',
+            description: 'Optional YYYY-MM-DD if the line implies a specific day.',
+          },
+        },
+      },
+    },
+  },
+};
 
 function isTransientNetworkError(e) {
   const code = e?.cause?.code || e?.code;
@@ -79,7 +108,225 @@ app.get('/', (_req, res) => {
   res
     .status(200)
     .type('text/plain')
-    .send('cashflow voice backend: POST /voice/parse (multipart form-data field "audio"), GET /health');
+    .send(
+      'cashflow backend: POST /voice/parse (multipart "audio"), POST /text/parse (JSON { text }), POST /image/parse-transactions (multipart "image"), GET /health'
+    );
+});
+
+/**
+ * POST /text/parse
+ * JSON body: { text: string }
+ * Uses OpenAI to turn messy notes into structured transactions.
+ */
+app.post('/text/parse', async (req, res) => {
+  const requestId = crypto.randomUUID();
+  const t0 = Date.now();
+  const log = (msg, extra) => {
+    const dt = Date.now() - t0;
+    const suffix = extra ? ` ${JSON.stringify(extra)}` : '';
+    console.log(`[text:${requestId}] +${dt}ms ${msg}${suffix}`);
+  };
+
+  let stage = 'start';
+
+  try {
+    const raw = req.body?.text;
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    if (!text) {
+      return res.status(400).json({ error: 'Missing or empty "text" string', requestId });
+    }
+    if (text.length > 12000) {
+      return res.status(400).json({ error: 'Text too long (max 12000 characters)', requestId });
+    }
+
+    log('request', { chars: text.length });
+
+    const system =
+      'You convert unstructured financial notes into structured transaction rows. ' +
+      'Return ONLY valid JSON. No markdown, no commentary. ' +
+      'Infer signed amounts: purchases and bills are negative; income is positive.';
+
+    const user =
+      `Today is ${new Date().toISOString().slice(0, 10)}.\n\n` +
+      `User notes:\n${JSON.stringify(text)}\n\n` +
+      `Extract every distinct transaction you can. Skip header lines or totals if they duplicate line items. ` +
+      `If the currency is unclear, assume USD.\n\n` +
+      `Return JSON matching this schema:\n${JSON.stringify(TRANSACTION_EXTRACT_SCHEMA_HINT)}`;
+
+    stage = 'extract_call';
+    log('openai:start');
+    const completion = await withConnResetRetries(() =>
+      openai.chat.completions.create({
+        model: process.env.OPENAI_TEXT_PARSE_MODEL || process.env.OPENAI_EXTRACT_MODEL || 'gpt-4o-mini',
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      })
+    );
+    log('openai:done');
+
+    stage = 'extract_parse';
+    const content = completion.choices?.[0]?.message?.content?.trim() || '';
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      log('json_parse_failed', { sample: content.slice(0, 160) });
+      return res.status(502).json({
+        error: 'Model returned non-JSON',
+        requestId,
+        timingsMs: { total: Date.now() - t0 },
+      });
+    }
+
+    const rows = Array.isArray(parsed?.transactions) ? parsed.transactions : [];
+    const transactions = rows
+      .map((row) => ({
+        description: String(row?.description ?? '').trim() || 'Transaction',
+        amount: Number(row?.amount),
+        ...(typeof row?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.date) ? { date: row.date } : {}),
+      }))
+      .filter((row) => Number.isFinite(row.amount));
+
+    const total = Date.now() - t0;
+    log('success', { count: transactions.length, totalMs: total });
+
+    return res.json({
+      transactions,
+      requestId,
+      timingsMs: { total },
+    });
+  } catch (e) {
+    const total = Date.now() - t0;
+    const code = e?.cause?.code || e?.code;
+    log('error', { stage, code, message: String(e?.message || ''), totalMs: total });
+    console.error(e);
+    const isTransient = isTransientNetworkError(e);
+    return res.status(isTransient ? 503 : 500).json({
+      error: e?.message || 'Unknown error',
+      code,
+      stage,
+      requestId,
+      timingsMs: { total },
+    });
+  }
+});
+
+/**
+ * POST /image/parse-transactions
+ * multipart/form-data: image field named "image" (bank activity screenshot).
+ */
+app.post('/image/parse-transactions', upload.single('image'), async (req, res) => {
+  const requestId = crypto.randomUUID();
+  const t0 = Date.now();
+  const log = (msg, extra) => {
+    const dt = Date.now() - t0;
+    const suffix = extra ? ` ${JSON.stringify(extra)}` : '';
+    console.log(`[image:${requestId}] +${dt}ms ${msg}${suffix}`);
+  };
+
+  let stage = 'start';
+
+  try {
+    const file = req.file;
+    if (!file?.buffer?.length) {
+      return res.status(400).json({ error: 'Missing image multipart field "image"', requestId });
+    }
+
+    log('request', {
+      bytes: file.size,
+      mime: file.mimetype,
+      name: file.originalname,
+    });
+
+    const mime = file.mimetype || 'image/jpeg';
+    const b64 = file.buffer.toString('base64');
+    const dataUrl = `data:${mime};base64,${b64}`;
+
+    const system =
+      'You extract banking transactions from screenshots of account activity. ' +
+      'Return ONLY valid JSON. No markdown, no commentary. ' +
+      'Signed amounts in USD: debits and purchases negative; deposits and refunds positive. ' +
+      'Skip headers, totals/summary-only rows, and running balances unless they are clearly a distinct transaction line.';
+
+    const userLines = [
+      `Today is ${new Date().toISOString().slice(0, 10)}.`,
+      '',
+      'Extract every distinct transaction row visible in the image.',
+      'Include date (YYYY-MM-DD) per row only when clearly shown for that row; otherwise omit.',
+      '',
+      `Return JSON matching this schema:\n${JSON.stringify(TRANSACTION_EXTRACT_SCHEMA_HINT)}`,
+    ];
+
+    stage = 'vision_call';
+    log('openai:start');
+    const completion = await withConnResetRetries(() =>
+      openai.chat.completions.create({
+        model: process.env.OPENAI_VISION_MODEL || process.env.OPENAI_TEXT_PARSE_MODEL || 'gpt-4o-mini',
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: system },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: userLines.join('\n') },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          },
+        ],
+      })
+    );
+    log('openai:done');
+
+    stage = 'vision_parse';
+    const content = completion.choices?.[0]?.message?.content?.trim() || '';
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      log('json_parse_failed', { sample: content.slice(0, 160) });
+      return res.status(502).json({
+        error: 'Model returned non-JSON',
+        requestId,
+        timingsMs: { total: Date.now() - t0 },
+      });
+    }
+
+    const rows = Array.isArray(parsed?.transactions) ? parsed.transactions : [];
+    const transactions = rows
+      .map((row) => ({
+        description: String(row?.description ?? '').trim() || 'Transaction',
+        amount: Number(row?.amount),
+        ...(typeof row?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.date) ? { date: row.date } : {}),
+      }))
+      .filter((row) => Number.isFinite(row.amount));
+
+    const total = Date.now() - t0;
+    log('success', { count: transactions.length, totalMs: total });
+
+    return res.json({
+      transactions,
+      requestId,
+      timingsMs: { total },
+    });
+  } catch (e) {
+    const total = Date.now() - t0;
+    const code = e?.cause?.code || e?.code;
+    log('error', { stage, code, message: String(e?.message || ''), totalMs: total });
+    console.error(e);
+    const isTransient = isTransientNetworkError(e);
+    return res.status(isTransient ? 503 : 500).json({
+      error: e?.message || 'Unknown error',
+      code,
+      stage,
+      requestId,
+      timingsMs: { total },
+    });
+  }
 });
 
 /**

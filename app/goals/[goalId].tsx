@@ -110,7 +110,7 @@ export default function GoalDetailScreen() {
   const planOverrides = useMemo(() => safeOverrides((goal as any).planOverrides), [goalId, (goal as any).planOverrides]);
 
   const schedule: string[] = useMemo(() => {
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayIso = toIsoDate(new Date());
     if (goalType === 'target' && targetDate) {
       const months = monthsBetweenInclusive(todayIso, targetDate);
       return nextMonthsSchedule({ dayOfMonth: recurringDay, months });

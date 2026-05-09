@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, Text, View } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useNavigation, useRouter } from 'expo-router';
 
 import { DayDetailList, DayDetailItem } from '@/src/features/calendar/DayDetailList';
 import { WeekStrip, WeekStripLine, WeekStripSummary } from '@/src/features/calendar/WeekStrip';
@@ -24,7 +24,19 @@ import { useUserId } from '@/src/query/hooks/useUserId';
 import { useWhatIfTransactions } from '@/src/query/hooks/useWhatIfTransactions';
 import { useAppStore } from '@/src/state/useAppStore';
 import { computeActualBalancesAsOf } from '@/src/utils/balances';
-import { addDays, formatMonthDay, parseIsoDate, startOfWeek, toIsoDate } from '@/src/utils/dates';
+import {
+  addDays,
+  addMonths,
+  daysInMonthCount,
+  endOfMonth,
+  formatMonthDay,
+  formatMonthYear,
+  monthCalendarGridDays,
+  parseIsoDate,
+  startOfMonth,
+  startOfWeek,
+  toIsoDate,
+} from '@/src/utils/dates';
 import { newId } from '@/src/utils/uuid';
 
 const ACCOUNT_COLORS = [
@@ -48,8 +60,11 @@ function fallbackAccountColor(accountId: string): string {
 
 type AccountLite = { id: string; name?: string | null; color?: string | null };
 
-function formatRangeLabel(fromIso: string, days: number) {
-  const toIso = addDays(fromIso, days - 1);
+function formatRangeLabel(fromIso: string, viewSpan: 7 | 14 | 'month') {
+  if (viewSpan === 'month') {
+    return formatMonthYear(fromIso);
+  }
+  const toIso = addDays(fromIso, viewSpan - 1);
   const from = parseIsoDate(fromIso);
   const to = parseIsoDate(toIso);
 
@@ -65,14 +80,13 @@ function formatRangeLabel(fromIso: string, days: number) {
 function HeaderBar(props: {
   title: string;
   rangeLabel: string;
-  viewDays: 7 | 14;
+  viewDays: 7 | 14 | 'month';
   accountLabel: string;
   onOpenAccounts: () => void;
   onPrevRange: () => void;
   onNextRange: () => void;
   onToday: () => void;
-  onSetViewDays: (d: 7 | 14) => void;
-  onAdd: () => void;
+  onSetViewDays: (d: 7 | 14 | 'month') => void;
 }) {
   function Toggle({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
     return (
@@ -106,19 +120,15 @@ function HeaderBar(props: {
           </View>
         </View>
 
-        <View className="flex-row items-center gap-2">
-          <Pressable className="rounded-xl bg-white px-2.5 py-1.5" onPress={props.onOpenAccounts}>
-            <Text className="text-xs font-semibold text-neutral-700">Accts: {props.accountLabel}</Text>
-          </Pressable>
-          <Pressable className="h-9 w-9 items-center justify-center rounded-xl bg-emerald-600 active:opacity-90" onPress={props.onAdd}>
-            <Text className="text-lg font-bold text-white">+</Text>
-          </Pressable>
-        </View>
+        <Pressable className="rounded-xl bg-white px-2.5 py-1.5" onPress={props.onOpenAccounts}>
+          <Text className="text-xs font-semibold text-neutral-700">Accts: {props.accountLabel}</Text>
+        </Pressable>
       </View>
 
       <View className="flex-row gap-2">
         <Toggle label="7d" active={props.viewDays === 7} onPress={() => props.onSetViewDays(7)} />
         <Toggle label="14d" active={props.viewDays === 14} onPress={() => props.onSetViewDays(14)} />
+        <Toggle label="Month" active={props.viewDays === 'month'} onPress={() => props.onSetViewDays('month')} />
       </View>
     </View>
   );
@@ -202,6 +212,7 @@ function AccountPickerModal(props: {
 }
 
 export default function HomeScreen() {
+  const navigation = useNavigation();
   const router = useRouter();
   const userId = useUserId();
   const selectedDay = useAppStore((s) => s.selectedDay);
@@ -215,7 +226,7 @@ export default function HomeScreen() {
   const [txnOpen, setTxnOpen] = useState(false);
   const [whatIfOpen, setWhatIfOpen] = useState(false);
 
-  const [viewDays, setViewDays] = useState<7 | 14>(7);
+  const [viewDays, setViewDays] = useState<7 | 14 | 'month'>(7);
 
   const [showWhatIf, setShowWhatIf] = useState(true);
   const [showIncome, setShowIncome] = useState(true);
@@ -236,10 +247,33 @@ export default function HomeScreen() {
   const tagsQ = useTransactionTags();
   const knownTags = tagsQ.data ?? [];
 
-  const rangeStart = useMemo(() => startOfWeek(selectedDay), [selectedDay]);
-  const days = useMemo(() => Array.from({ length: viewDays }, (_, i) => addDays(rangeStart, i)), [rangeStart, viewDays]);
-  const rangeKey = `${rangeStart}_${viewDays}`;
-  const rangeEnd = useMemo(() => addDays(rangeStart, viewDays - 1), [rangeStart, viewDays]);
+  const monthGridDays = useMemo(
+    () => (viewDays === 'month' ? monthCalendarGridDays(selectedDay) : null),
+    [viewDays, selectedDay]
+  );
+
+  const rangeStart = useMemo(() => {
+    if (viewDays === 'month' && monthGridDays?.length) return monthGridDays[0]!;
+    if (viewDays === 'month') return startOfMonth(selectedDay);
+    return startOfWeek(selectedDay);
+  }, [monthGridDays, selectedDay, viewDays]);
+
+  const days = useMemo(() => {
+    if (viewDays === 'month' && monthGridDays) return monthGridDays;
+    return Array.from({ length: viewDays as number }, (_, i) => addDays(rangeStart, i));
+  }, [monthGridDays, rangeStart, viewDays]);
+
+  const rangeKey = `${rangeStart}_${viewDays}_${viewDays === 'month' ? monthGridDays?.length ?? 0 : ''}`;
+  const rangeEnd = useMemo(() => {
+    if (viewDays === 'month' && monthGridDays?.length) return monthGridDays[monthGridDays.length - 1]!;
+    if (viewDays === 'month') return endOfMonth(selectedDay);
+    return addDays(rangeStart, viewDays - 1);
+  }, [monthGridDays, rangeStart, selectedDay, viewDays]);
+
+  const monthFocusBounds = useMemo(() => {
+    if (viewDays !== 'month') return undefined;
+    return { from: startOfMonth(selectedDay), to: endOfMonth(selectedDay) };
+  }, [selectedDay, viewDays]);
 
   const accountsQ = useAccounts();
   const accounts = (accountsQ.data ?? []) as AccountLite[];
@@ -670,6 +704,24 @@ export default function HomeScreen() {
     else openTxnModal();
   }
 
+  const openPlusRef = useRef(openPlus);
+  openPlusRef.current = openPlus;
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable
+          className="mr-2 h-9 w-9 items-center justify-center rounded-xl bg-emerald-600 active:opacity-90"
+          onPress={() => openPlusRef.current()}
+          accessibilityRole="button"
+          accessibilityLabel="Add"
+        >
+          <Text className="text-lg font-bold text-white">+</Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation]);
+
   async function submitHomeTransaction() {
     const client = db;
     if (!client || !userId) return;
@@ -744,7 +796,6 @@ export default function HomeScreen() {
             .filter(Boolean),
           isWhatIf: true,
           whatIfKind,
-          matchStatus: 'what_if',
         }),
       ]);
       setWhatIfDesc('');
@@ -760,53 +811,75 @@ export default function HomeScreen() {
     setSelectedDay(toIsoDate(new Date()));
   }
 
+  /** After paging months: day 1 of the new month, or today if that month is the current calendar month. */
+  function dayAfterMonthNav(deltaMonths: number) {
+    const landed = addMonths(selectedDay, deltaMonths);
+    const landedMonthStart = startOfMonth(landed);
+    const thisMonthStart = startOfMonth(todayIso);
+    return landedMonthStart === thisMonthStart ? todayIso : landedMonthStart;
+  }
+
   function prevRange() {
+    if (viewDays === 'month') {
+      setSelectedDay(dayAfterMonthNav(-1));
+      return;
+    }
     setSelectedDay(addDays(selectedDay, -viewDays));
   }
 
   function nextRange() {
+    if (viewDays === 'month') {
+      setSelectedDay(dayAfterMonthNav(1));
+      return;
+    }
     setSelectedDay(addDays(selectedDay, viewDays));
   }
 
   return (
     <View className="flex-1 bg-neutral-100">
-      <View className="px-4 pb-3 pt-14">
-        <HeaderBar
-          title={formatMonthDay(selectedDay)}
-          rangeLabel={formatRangeLabel(rangeStart, viewDays)}
-          viewDays={viewDays}
-          onSetViewDays={setViewDays}
-          accountLabel={
-            selectedAccountId
-              ? (accounts.find((a) => a.id === selectedAccountId)?.name as string | undefined) ?? 'Selected'
-              : 'All'
-          }
-          onOpenAccounts={() => setAcctOpen(true)}
-          onPrevRange={prevRange}
-          onNextRange={nextRange}
-          onToday={jumpToToday}
-          onAdd={openPlus}
-        />
+      <DayDetailList
+        items={items}
+        ListHeaderComponent={
+          <View className="bg-neutral-100">
+            <View className="px-4 pb-3 pt-14">
+              <HeaderBar
+                title={formatMonthDay(selectedDay)}
+                rangeLabel={formatRangeLabel(viewDays === 'month' ? startOfMonth(selectedDay) : rangeStart, viewDays)}
+                viewDays={viewDays}
+                onSetViewDays={setViewDays}
+                accountLabel={
+                  selectedAccountId
+                    ? (accounts.find((a) => a.id === selectedAccountId)?.name as string | undefined) ?? 'Selected'
+                    : 'All'
+                }
+                onOpenAccounts={() => setAcctOpen(true)}
+                onPrevRange={prevRange}
+                onNextRange={nextRange}
+                onToday={jumpToToday}
+              />
 
-        <FilterPills
-          showWhatIf={showWhatIf}
-          showIncome={showIncome}
-          showBills={showBills}
-          showGoals={showGoals}
-          onToggleWhatIf={() => setShowWhatIf((v) => !v)}
-          onToggleIncome={() => setShowIncome((v) => !v)}
-          onToggleBills={() => setShowBills((v) => !v)}
-          onToggleGoals={() => setShowGoals((v) => !v)}
-        />
+              <FilterPills
+                showWhatIf={showWhatIf}
+                showIncome={showIncome}
+                showBills={showBills}
+                showGoals={showGoals}
+                onToggleWhatIf={() => setShowWhatIf((v) => !v)}
+                onToggleIncome={() => setShowIncome((v) => !v)}
+                onToggleBills={() => setShowBills((v) => !v)}
+                onToggleGoals={() => setShowGoals((v) => !v)}
+              />
 
-        <View className="mt-3">
-          <WeekStrip summaries={weekSummaries} days={days} />
-        </View>
-      </View>
+              <View className="mt-3">
+                <WeekStrip summaries={weekSummaries} days={days} monthFocusBounds={monthFocusBounds} />
+              </View>
+            </View>
 
-      <View className="flex-1 overflow-hidden rounded-t-3xl bg-white">
-        <DayDetailList items={items} />
-      </View>
+            <View className="overflow-hidden rounded-t-3xl bg-white">
+              <View className="h-2 bg-white" />
+            </View>
+          </View>
+        }
+      />
 
       <AccountPickerModal
         open={acctOpen}
