@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -9,13 +9,18 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { FlashList } from '@shopify/flash-list';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { db } from '@/src/db/instant';
 import type { Transaction } from '@/src/db/types';
 import { BulkAddModal, type BulkAddSaveParams, type BulkSaveRow } from '@/src/features/transactions/BulkAddModal';
-import { isWhatIfTxn } from '@/src/features/home/transactionFilters';
 import { TagAutocompleteField } from '@/src/features/transactions/TagAutocompleteField';
+import {
+  collectTagsFromTransactions,
+  filterTransactions,
+  sortTransactionsDateDesc,
+} from '@/src/features/transactions/transactionFilter';
+import { TransactionSearchFilters } from '@/src/features/transactions/TransactionSearchFilters';
+import { TransactionsFlashList } from '@/src/features/transactions/TransactionsFlashList';
 import { useAccounts } from '@/src/query/hooks/useAccounts';
 import { useTransactionTags } from '@/src/query/hooks/useTransactionTags';
 import { useUserId } from '@/src/query/hooks/useUserId';
@@ -37,45 +42,6 @@ function HeaderBar(props: { title: string; subtitle: string; onAdd: () => void; 
           <Text className="text-xs font-semibold text-white">Add txn</Text>
         </Pressable>
       </View>
-    </View>
-  );
-}
-
-function TransactionsList(props: { txns: any[] }) {
-  return (
-    <View className="flex-1 overflow-hidden rounded-t-3xl bg-white">
-      <FlashList
-        data={props.txns}
-        keyExtractor={(t) => t.id}
-        ItemSeparatorComponent={() => <View className="h-px bg-neutral-100" />}
-        ListEmptyComponent={() => (
-          <View className="px-4 py-6">
-            <Text className="text-sm text-neutral-500">No transactions yet. Add one from here or the home screen.</Text>
-          </View>
-        )}
-        renderItem={({ item }) => {
-          const isWhatIf = isWhatIfTxn(item as Transaction);
-          const matched = item.matchStatus === 'matched' && item.matchedEventId;
-          const tags = Array.isArray(item.tags) ? (item.tags as string[]) : [];
-          const statusParts: string[] = [];
-          if (isWhatIf) statusParts.push('What-if');
-          if (matched) statusParts.push('Matched');
-          const meta = [item.postedAt.slice(0, 10), ...statusParts, ...(tags.length ? [tags.join(', ')] : [])].filter(Boolean).join(' • ');
-          return (
-            <View className="flex-row items-center justify-between bg-white px-4 py-3">
-              <View className="flex-1 pr-3">
-                <Text className="text-sm font-semibold text-neutral-900" numberOfLines={1}>
-                  {item.description || 'Transaction'}
-                </Text>
-                <Text className="mt-0.5 text-xs text-neutral-500">{meta}</Text>
-              </View>
-              <Text className={item.amount >= 0 ? 'text-sm font-semibold text-emerald-700' : 'text-sm font-semibold text-rose-700'}>
-                {item.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
-              </Text>
-            </View>
-          );
-        }}
-      />
     </View>
   );
 }
@@ -256,6 +222,25 @@ export default function ActivityScreen() {
   const tagsQ = useTransactionTags();
   const knownTags = tagsQ.data ?? [];
 
+  const [search, setSearch] = useState('');
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(() => new Set());
+
+  const tagOptionsInRange = useMemo(() => collectTagsFromTransactions(txnsInRange), [txnsInRange]);
+
+  const filteredSorted = useMemo(() => {
+    const filtered = filterTransactions(txnsInRange, search, selectedTags);
+    return filtered.slice().sort(sortTransactionsDateDesc);
+  }, [txnsInRange, search, selectedTags]);
+
+  const toggleTag = useCallback((tag: string) => {
+    setSelectedTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
+  }, []);
+
   async function addTransaction() {
     if (!db || !userId || !accountId) return;
     try {
@@ -359,9 +344,47 @@ export default function ActivityScreen() {
             setOpen(true);
           }}
         />
+        <View className="mt-4">
+          <TransactionSearchFilters
+            search={search}
+            onSearchChange={setSearch}
+            tagOptions={tagOptionsInRange}
+            selectedTags={selectedTags}
+            toggleTag={toggleTag}
+          />
+          {filteredSorted.length !== txnsInRange.length ? (
+            <Text className="mt-2 text-[11px] text-neutral-500">
+              Showing {filteredSorted.length} of {txnsInRange.length}
+            </Text>
+          ) : null}
+        </View>
       </View>
 
-      <TransactionsList txns={txnsInRange.slice().sort((a, b) => ((a.postedAt ?? '') < (b.postedAt ?? '') ? 1 : -1))} />
+      <TransactionsFlashList
+        txns={filteredSorted}
+        emptyHint={
+          txnsInRange.length === 0
+            ? 'No transactions yet. Add one from here or the home screen.'
+            : 'No transactions match your search or tags. Clear filters to see more.'
+        }
+        onDelete={(txn) => {
+          Alert.alert('Delete transaction?', txn.description || 'Transaction', [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: async () => {
+                if (!db) return;
+                try {
+                  await db.transact([db.tx.transactions[txn.id].delete()]);
+                } catch (e: any) {
+                  Alert.alert('Could not delete', e?.message ?? 'Unknown error');
+                }
+              },
+            },
+          ]);
+        }}
+      />
 
       <AddTransactionModal
         open={open}

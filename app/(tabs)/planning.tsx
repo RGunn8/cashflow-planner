@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Dimensions, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
+import { Swipeable } from 'react-native-gesture-handler';
 
 import { db } from '@/src/db/instant';
 import { materializeScheduledEvents } from '@/src/features/planning/materialize';
@@ -614,6 +615,79 @@ export default function PlanningScreen() {
     return m;
   }, [accounts]);
 
+  // Used to clean up materialized scheduledEvents when deleting recurring rules/goals.
+  const scheduledInstant: any = db?.useQuery(
+    (userId
+      ? {
+          scheduledEvents: {
+            $: {
+              where: {
+                userId,
+              },
+            },
+          },
+        }
+      : {}) as any
+  );
+  const scheduledAll = (scheduledInstant?.data?.scheduledEvents ?? []) as any[];
+
+  async function deleteRecurringRule(ruleId: string, label: string) {
+    const client = db;
+    if (!client) return;
+
+    Alert.alert('Delete recurring item?', label, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const toDeleteEvents = scheduledAll.filter((e) => e.ruleId === ruleId);
+            await client.transact([
+              ...toDeleteEvents.map((e) => client.tx.scheduledEvents[e.id].delete()),
+              client.tx.recurringRules[ruleId].delete(),
+            ]);
+          } catch (e: any) {
+            Alert.alert('Could not delete', e?.message ?? 'Unknown error');
+          }
+        },
+      },
+    ]);
+  }
+
+  async function deleteGoal(goal: any) {
+    const client = db;
+    if (!client) return;
+
+    const label = String(goal?.name ?? 'Goal');
+    Alert.alert('Delete goal?', label, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const txs: any[] = [];
+
+            // Delete linked recurring rule + its scheduled events if present.
+            const rrid = goal?.recurringRuleId as string | undefined;
+            if (rrid) {
+              const toDeleteEvents = scheduledAll.filter((e) => e.ruleId === rrid);
+              txs.push(...toDeleteEvents.map((e) => client.tx.scheduledEvents[e.id].delete()));
+              txs.push(client.tx.recurringRules[rrid].delete());
+            }
+
+            txs.push(client.tx.goals[goal.id].delete());
+
+            await client.transact(txs);
+          } catch (e: any) {
+            Alert.alert('Could not delete', e?.message ?? 'Unknown error');
+          }
+        },
+      },
+    ]);
+  }
+
   async function saveBulkBills(params: BulkAddSaveParams) {
     if (params.mode !== 'bills') return;
     const client = db;
@@ -782,12 +856,23 @@ export default function PlanningScreen() {
         <RulesSection title="Recurring income" emptyText="No recurring income yet.">
           {sortedIncome.length
             ? sortedIncome.map((r) => (
-                <RuleRow
+                <Swipeable
                   key={r.id}
-                  rule={r}
-                  amountClass="text-sm font-semibold text-emerald-700"
-                  amountText={r.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
-                />
+                  renderRightActions={() => (
+                    <Pressable
+                      className="h-full w-24 items-center justify-center bg-rose-600"
+                      onPress={() => deleteRecurringRule(r.id, r.name || 'Recurring income')}
+                    >
+                      <Text className="text-xs font-semibold text-white">Delete</Text>
+                    </Pressable>
+                  )}
+                >
+                  <RuleRow
+                    rule={r}
+                    amountClass="text-sm font-semibold text-emerald-700"
+                    amountText={r.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+                  />
+                </Swipeable>
               ))
             : undefined}
         </RulesSection>
@@ -795,12 +880,23 @@ export default function PlanningScreen() {
         <RulesSection title="Recurring bills" emptyText="No recurring bills yet.">
           {sortedBills.length
             ? sortedBills.map((r) => (
-                <RuleRow
+                <Swipeable
                   key={r.id}
-                  rule={r}
-                  amountClass="text-sm font-semibold text-rose-700"
-                  amountText={(-Math.abs(r.amount)).toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
-                />
+                  renderRightActions={() => (
+                    <Pressable
+                      className="h-full w-24 items-center justify-center bg-rose-600"
+                      onPress={() => deleteRecurringRule(r.id, r.name || 'Recurring bill')}
+                    >
+                      <Text className="text-xs font-semibold text-white">Delete</Text>
+                    </Pressable>
+                  )}
+                >
+                  <RuleRow
+                    rule={r}
+                    amountClass="text-sm font-semibold text-rose-700"
+                    amountText={(-Math.abs(r.amount)).toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+                  />
+                </Swipeable>
               ))
             : undefined}
         </RulesSection>
@@ -844,7 +940,18 @@ export default function PlanningScreen() {
           </View>
         </View>
         {sortedGoals.length ? (
-          sortedGoals.map((g: any) => <GoalRow key={g.id} goal={g} onOpen={(id) => router.push(`/goals/${id}`)} />)
+          sortedGoals.map((g: any) => (
+            <Swipeable
+              key={g.id}
+              renderRightActions={() => (
+                <Pressable className="h-full w-24 items-center justify-center bg-rose-600" onPress={() => deleteGoal(g)}>
+                  <Text className="text-xs font-semibold text-white">Delete</Text>
+                </Pressable>
+              )}
+            >
+              <GoalRow goal={g} onOpen={(id) => router.push(`/goals/${id}`)} />
+            </Swipeable>
+          ))
         ) : (
           <View className="bg-white px-4 py-4">
             <Text className="text-sm text-neutral-500">No goals yet. Add one to track progress.</Text>
