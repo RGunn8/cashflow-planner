@@ -14,10 +14,18 @@ export function TransactionsFlashList(props: {
   showRunningBalance?: boolean;
   /** Wrapper around the list (default: rounded top card on gray background). */
   wrapperClassName?: string;
+
+  // Swipe-to-delete mode
   onDelete?: (txn: Transaction) => void;
+
+  // Multi-select mode
+  selectionMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
 }) {
   const showBal = props.showRunningBalance === true;
   const wrap = props.wrapperClassName ?? 'flex-1 overflow-hidden rounded-t-3xl bg-white';
+  const selectionMode = props.selectionMode === true;
 
   return (
     <View className={wrap}>
@@ -37,11 +45,7 @@ export function TransactionsFlashList(props: {
           const statusParts: string[] = [];
           if (isWhatIf) statusParts.push('What-if');
           if (matched) statusParts.push('Matched');
-          const meta = [
-            item.postedAt.slice(0, 10),
-            ...statusParts,
-            ...(tags.length ? [tags.join(', ')] : []),
-          ]
+          const meta = [item.postedAt.slice(0, 10), ...statusParts, ...(tags.length ? [tags.join(', ')] : [])]
             .filter(Boolean)
             .join(' • ');
 
@@ -54,44 +58,67 @@ export function TransactionsFlashList(props: {
                 : '';
           }
 
-            const row = (
-              <View className="flex-row items-center gap-3 bg-white px-4 py-3">
-                <View className="min-w-0 flex-1">
-                  <Text className="text-sm font-semibold text-neutral-900" numberOfLines={1}>
-                    {item.description || 'Transaction'}
-                  </Text>
-                  <Text className="mt-0.5 text-xs text-neutral-500" numberOfLines={2}>
-                    {meta}
-                  </Text>
-                </View>
+          const selected = props.selectedIds?.has(item.id) === true;
 
-                <View className="items-end">
-                  <Text className={item.amount >= 0 ? 'text-sm font-semibold text-emerald-700' : 'text-sm font-semibold text-rose-700'}>
-                    {item.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+          const rowCore = (
+            <View className={selected ? 'flex-row items-center gap-3 bg-neutral-50 px-4 py-3' : 'flex-row items-center gap-3 bg-white px-4 py-3'}>
+              {selectionMode ? (
+                <View
+                  className={
+                    selected
+                      ? 'h-6 w-6 items-center justify-center rounded-full bg-neutral-900'
+                      : 'h-6 w-6 items-center justify-center rounded-full border border-neutral-300 bg-white'
+                  }
+                >
+                  <Text className={selected ? 'text-xs font-semibold text-white' : 'text-xs font-semibold text-transparent'}>
+                    ✓
                   </Text>
-                  {showBal ? (
-                    <Text className="mt-1 text-[11px] font-medium text-neutral-500">{balText ? `Bal ${balText}` : '—'}</Text>
-                  ) : null}
                 </View>
+              ) : null}
+
+              <View className="min-w-0 flex-1">
+                <Text className="text-sm font-semibold text-neutral-900" numberOfLines={1}>
+                  {item.description || 'Transaction'}
+                </Text>
+                <Text className="mt-0.5 text-xs text-neutral-500" numberOfLines={2}>
+                  {meta}
+                </Text>
               </View>
-            );
 
-            if (!props.onDelete) return row;
+              <View className="items-end">
+                <Text className={item.amount >= 0 ? 'text-sm font-semibold text-emerald-700' : 'text-sm font-semibold text-rose-700'}>
+                  {item.amount.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+                </Text>
+                {showBal ? (
+                  <Text className="mt-1 text-[11px] font-medium text-neutral-500">{balText ? `Bal ${balText}` : '—'}</Text>
+                ) : null}
+              </View>
+            </View>
+          );
 
+          // In selection mode: tap toggles selection; disable swipe actions.
+          if (selectionMode) {
             return (
-              <Swipeable
-                renderRightActions={() => (
-                  <Pressable
-                    className="h-full w-24 items-center justify-center bg-rose-600"
-                    onPress={() => props.onDelete?.(item)}
-                  >
-                    <Text className="text-xs font-semibold text-white">Delete</Text>
-                  </Pressable>
-                )}
-              >
-                {row}
-              </Swipeable>
+              <Pressable className="bg-white" onPress={() => props.onToggleSelect?.(item.id)}>
+                {rowCore}
+              </Pressable>
             );
+          }
+
+          // Swipe to delete (default)
+          if (!props.onDelete) return rowCore;
+
+          return (
+            <Swipeable
+              renderRightActions={() => (
+                <Pressable className="h-full w-24 items-center justify-center bg-rose-600" onPress={() => props.onDelete?.(item)}>
+                  <Text className="text-xs font-semibold text-white">Delete</Text>
+                </Pressable>
+              )}
+            >
+              {rowCore}
+            </Swipeable>
+          );
         }}
       />
     </View>
