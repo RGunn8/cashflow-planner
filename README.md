@@ -38,28 +38,49 @@ npx expo start -c
 
 ---
 
-## Voice backend (Render)
+## Parse/Voice backend (Supabase Edge Functions)
 
-The voice endpoint is a small Node service located at `voice-backend/`.
+AI-assisted parsing runs on Supabase Edge Functions (Deno) under `supabase/functions/`.
 
-### Endpoints
-- `GET /health` → `{ ok: true }`
-- `POST /voice/parse` → multipart/form-data with an `audio` field
+### Deployed base URL
+Set this in `.env.local`:
 
-### Required Render env vars
-Set these in your Render service environment:
-- `OPENAI_API_KEY` (secret)
-- `OPENAI_TRANSCRIBE_MODEL` (default `whisper-1`)
-- `OPENAI_EXTRACT_MODEL` (default `gpt-4o-mini`)
+```bash
+EXPO_PUBLIC_PARSE_API_URL=https://<project-ref>.functions.supabase.co
+# (fallback name also supported)
+# EXPO_PUBLIC_VOICE_API_URL=https://<project-ref>.functions.supabase.co
+```
 
-### Debugging voice latency / errors
-The backend logs request-scoped timing information to Render logs.
-Look for lines like:
-- `[voice:<requestId>] transcription:start`
-- `[voice:<requestId>] extract:start`
-- `[voice:<requestId>] success { totalMs: ... }`
+### Functions
+These names/paths are chosen to match the app’s current requests:
 
-If you see `ECONNRESET` / `APIConnectionError`, it indicates transient network resets when calling OpenAI.
+- `text` function
+  - `POST /text/parse` with JSON `{ text: string }`
+
+- `image` function
+  - `POST /image/parse-transactions` with multipart form-data field `image`
+
+- (optional) `voice-parse` function
+  - `POST /voice-parse` with multipart form-data field `audio`
+
+### Secrets / env vars (Supabase)
+Set via Supabase CLI:
+
+```bash
+supabase secrets set OPENAI_API_KEY=... \
+  OPENAI_VISION_MODEL=gpt-4o-mini \
+  OPENAI_TRANSCRIBE_MODEL=whisper-1 \
+  OPENAI_EXTRACT_MODEL=gpt-4o-mini
+```
+
+### Deploy
+```bash
+supabase functions deploy text
+supabase functions deploy image
+supabase functions deploy voice-parse   # optional
+```
+
+> Note: the local `server/` and `voice-backend/` folders are legacy Render/Node implementations.
 
 ---
 
