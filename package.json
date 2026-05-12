@@ -7,7 +7,21 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "parse-server": "cd server && npm start"
+    "parse-server": "cd server && npm start",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "setupFilesAfterEnv": [
+      "<rootDir>/jest.setup.ts"
+    ],
+    "testMatch": [
+      "**/?(*.)+(spec|test).[jt]s?(x)"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules/(?!(jest-)?react-native|@react-native|@react-navigation|expo(nent)?|@expo(nent)?/.*|expo-router|react-native-reanimated|react-native-gesture-handler|@instantdb/.*|@shopify/flash-list)"
+    ]
   },
   "dependencies": {
     "@expo/ui": "^55.0.15",
@@ -45,7 +59,12 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
+    "@testing-library/jest-native": "^5.4.3",
+    "@testing-library/react-native": "^13.3.3",
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.1.0",
+    "jest": "^29.7.0",
+    "jest-expo": "^55.0.17",
     "react-test-renderer": "19.1.0",
     "typescript": "~5.9.2"
   },
